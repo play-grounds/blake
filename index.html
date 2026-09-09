@@ -88,7 +88,10 @@
     // Esplora-style API on the BLAKE2b mainnet chain. Override with
     // ?api=<base> (remembered in localStorage) or ?api=reset to go back to
     // the default. Explorer links are derived by stripping the trailing /api.
-    const DEFAULT_API_BASE = 'https://mempool.guide/api';
+    // mempool.guide's mainnet API does not send Access-Control-Allow-Origin (its
+    // testnet4 one does), so browsers cannot call it. Kilombino's instance of the
+    // same software does, and follows the same chain.
+    const DEFAULT_API_BASE = 'https://mempool.kilombino.com/api';
     function resolveApiBase() {
       const params = new URLSearchParams(window.location.search);
       const q = params.get('api');

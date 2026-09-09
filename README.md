@@ -14,7 +14,7 @@ Live: https://play-grounds.github.io/blake/
 ## What it does
 
 - Generates or imports a key (hex, Nostr nsec, or WIF).
-- Shows balance and history from an Esplora-style API. Default is `https://mempool.guide/api`, the BLAKE2b chain's public explorer.
+- Shows balance and history from an Esplora-style API. Default is `https://mempool.kilombino.com/api`, a self-hosted instance of the mempool.guide software on the BLAKE2b chain. mempool.guide itself would be the obvious default, but its mainnet API sends no `Access-Control-Allow-Origin` header, so browsers cannot call it; use `?api=` to switch if that changes.
 - Sends to `bc1q`, `bc1p` and P2WSH addresses, RBF on, unified sighash always.
 - Can relay a legacy-signed payment made to your address on the SHA256d chain onto the BLAKE2b chain, if its inputs exist there. It signs nothing for this.
 
