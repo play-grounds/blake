@@ -61,6 +61,23 @@ const lp = parseTransaction(hexToBytes(legacy.hex));
 ok(lp.inputs.every(i => i.witness[0].length === 64), 'legacy path signs 64-byte SIGHASH_DEFAULT');
 
 
+// ---- sweep: every input, one output, to self --------------------------------
+{
+  const many = Array.from({ length: 60 }, (_, i) => ({ txid: (i + 1).toString(16).padStart(64, '0'), vout: i, value: 13_740 + i }));
+  const self = getTaprootAddress(priv);
+  const sw = await createTransaction(priv, many, self, 0, 1, { sweep: true });
+  const sp = parseTransaction(hexToBytes(sw.hex));
+  const total = many.reduce((a, u) => a + u.value, 0);
+  ok(sp.inputs.length === 60 && sp.outputs.length === 1, 'sweep spends every input into one output');
+  ok(sw.inputs === 60 && sw.totalInput === total && sw.amount === total - sw.fee, 'sweep amount is total minus fee');
+  ok(sw.fee === Math.ceil(10.5 + 60 * 57.75 + 43) * 1, 'sweep fee: one output at 1 sat/vB');
+  ok(Number(sp.outputs[0].value) === sw.amount && bytesToHex(sp.outputs[0].script) === bytesToHex(p2tr), 'sweep output is our own key');
+  ok(sp.inputs.every(i => i.witness[0].length === 65), 'sweep signs with the unified sighash');
+  let threw = false;
+  try { await createTransaction(priv, [{ txid: 'cc'.repeat(32), vout: 0, value: 100 }], self, 0, 1, { sweep: true }); } catch { threw = true; }
+  ok(threw, 'sweep refuses to produce dust');
+}
+
 // ---- coinbase maturity (Knots PR 419) --------------------------------------
 {
   const { coinbaseMaturity, maturityState } = await import('./bitcoin.js');

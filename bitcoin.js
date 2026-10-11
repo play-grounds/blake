@@ -302,14 +302,18 @@ export function createOutputScript(address) {
   throw new Error('Unsupported address type');
 }
 
-export async function createTransaction(privateKey, utxos, toAddress, amount, feeRate, { unified = true } = {}) {
+// With sweep=true every given UTXO is spent into a single output of
+// (total - fee) to toAddress and `amount` is ignored: the shape for
+// consolidating mined coins into an ordinary output that no coinbase
+// maturity rule can touch.
+export async function createTransaction(privateKey, utxos, toAddress, amount, feeRate, { unified = true, sweep = false } = {}) {
   const fromAddress = getTaprootAddress(privateKey);
   const xOnlyPubKey = getXOnlyPubKey(privateKey);
 
   // Select UTXOs
   let totalInput = 0n;
   const selectedUtxos = [];
-  const targetAmount = BigInt(amount);
+  let targetAmount = sweep ? 0n : BigInt(amount);
 
   // Sort UTXOs by value (largest first for efficiency)
   const sortedUtxos = [...utxos].sort((a, b) => b.value - a.value);
@@ -317,26 +321,29 @@ export async function createTransaction(privateKey, utxos, toAddress, amount, fe
   for (const utxo of sortedUtxos) {
     selectedUtxos.push(utxo);
     totalInput += BigInt(utxo.value);
+    if (sweep) continue;                       // a sweep takes everything
     // Estimate fee: ~111 vbytes for 1-in-1-out P2TR, add ~58 for each additional input
     // (a 65-byte opted-in signature adds a quarter vbyte per input)
     const estimatedVbytes = 111 + (selectedUtxos.length - 1) * 58;
     const estimatedFee = BigInt(estimatedVbytes * feeRate);
     if (totalInput >= targetAmount + estimatedFee) break;
   }
+  if (sweep && selectedUtxos.length === 0) throw new Error('Nothing to sweep');
 
   // Calculate fee (P2TR is more efficient than P2WPKH)
-  // 10.5 (overhead) + 57.5 per input + 43 per P2TR output
-  const vbytes = Math.ceil(10.5 + selectedUtxos.length * (unified ? 57.75 : 57.5) + 2 * 43);
+  // 10.5 (overhead) + 57.5 per input + 43 per P2TR output (one output when sweeping)
+  const vbytes = Math.ceil(10.5 + selectedUtxos.length * (unified ? 57.75 : 57.5) + (sweep ? 1 : 2) * 43);
   const fee = BigInt(vbytes * feeRate);
+  if (sweep) targetAmount = totalInput - fee;
   const change = totalInput - targetAmount - fee;
 
-  if (change < 0n) {
+  if (change < 0n || (sweep && targetAmount < 330n)) {
     throw new Error('Insufficient funds');
   }
 
   // Build transaction
   const outputs = [{ address: toAddress, value: targetAmount }];
-  if (change >= 330n) { // Taproot dust threshold is lower
+  if (!sweep && change >= 330n) { // Taproot dust threshold is lower
     outputs.push({ address: fromAddress, value: change });
   }
 
@@ -452,7 +459,8 @@ export async function createTransaction(privateKey, utxos, toAddress, amount, fe
     replayProtected: unified,
     fee: Number(fee),
     totalInput: Number(totalInput),
-    amount: Number(targetAmount)
+    amount: Number(targetAmount),
+    inputs: selectedUtxos.length
   };
 }
 
