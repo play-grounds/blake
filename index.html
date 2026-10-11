@@ -191,12 +191,16 @@
     // Sort the wallet's UTXOs into spendable / maturing / locked / pending and
     // sum each bucket. See coinbaseMaturity in bitcoin.js for the rule.
     function bucketUtxos(utxos, tipHeight, coinbaseFlags) {
-      const sums = { spendable: 0, maturing: 0, locked: 0, pending: 0 };
+      // spendable = safe (ordinary outputs, no maturity rule can ever touch them)
+      //           + atRisk (mined, spendable by policy today, but still a coinbase
+      //             output that a later maturity change could lock again)
+      const sums = { spendable: 0, safe: 0, atRisk: 0, maturing: 0, locked: 0, pending: 0 };
       const annotated = utxos.map((u) => {
         const isCoinbase = !!coinbaseFlags[u.txid];
         const state = tipHeight == null ? (u.status?.confirmed ? 'spendable' : 'pending') : maturityState(u, tipHeight, isCoinbase);
         const { consensusAt, policyAt } = coinbaseMaturity(u.status?.block_height, isCoinbase);
         sums[state] += u.value;
+        if (state === 'spendable') sums[isCoinbase ? 'atRisk' : 'safe'] += u.value;
         return { ...u, isCoinbase, state, consensusAt, policyAt };
       });
       // The next policy unlock: lowest policyAt among maturing/locked outputs.
@@ -322,7 +326,7 @@
     function App() {
       const [wallet, setWallet] = useState(null);
       const [view, setView] = useState('home');
-      const EMPTY_BALANCE = { confirmed: 0, unconfirmed: 0, total: 0, spendable: 0, maturing: 0, locked: 0, pending: 0, tipHeight: null, nextUnlock: null, utxos: [] };
+      const EMPTY_BALANCE = { confirmed: 0, unconfirmed: 0, total: 0, spendable: 0, safe: 0, atRisk: 0, maturing: 0, locked: 0, pending: 0, tipHeight: null, nextUnlock: null, utxos: [] };
       const [balance, setBalance] = useState(EMPTY_BALANCE);
       const [transactions, setTransactions] = useState([]);
       const [loading, setLoading] = useState(false);
@@ -792,10 +796,14 @@
               <h2 class="text-4xl font-bold text-white mb-2">${formatSats(balance.total)} BTC</h2>
               <p class="text-primary-300 text-sm">${balance.total.toLocaleString()} sats</p>
             </div>
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6 pt-6 border-t border-primary-700">
+            <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mt-6 pt-6 border-t border-primary-700">
               <div class="text-center">
-                <p class="text-primary-300 text-xs">Spendable</p>
-                <p class="text-white font-medium">${formatSats(balance.spendable)} BTC</p>
+                <p class="text-primary-300 text-xs">Safe</p>
+                <p class="text-white font-medium">${formatSats(balance.safe)} BTC</p>
+              </div>
+              <div class="text-center">
+                <p class="text-primary-300 text-xs">At risk</p>
+                <p class="text-orange-300 font-medium">${formatSats(balance.atRisk)} BTC</p>
               </div>
               <div class="text-center">
                 <p class="text-primary-300 text-xs">Maturing</p>
@@ -810,8 +818,10 @@
                 <p class="text-white font-medium">${formatSats(balance.pending)} BTC</p>
               </div>
             </div>
-            ${(balance.maturing > 0 || balance.locked > 0) && html`
+            ${(balance.maturing > 0 || balance.locked > 0 || balance.atRisk > 0) && html`
               <p class="text-primary-200 text-xs mt-4 text-center leading-relaxed">
+                <span class="text-white">Safe</span> coins are ordinary outputs; no maturity rule can ever touch them.
+                <span class="text-orange-300">At risk</span> coins are mined, spendable today, but still coinbase outputs that a later maturity change could lock again: spend them to yourself and they become safe.
                 Mined coins need ${LONG_COINBASE_MATURITY.depth.toLocaleString()} confirmations before Knots 29.4.2 nodes will relay a spend
                 (<a href="https://github.com/bitcoinknots/bitcoin/pull/419" target="_blank" class="underline">PR 419</a>).
                 <span class="text-yellow-300">Maturing</span> coins are already valid by consensus but not yet by that policy; <span class="text-red-300">locked</span> coins are not yet valid at all.
@@ -825,15 +835,14 @@
               return html`
                 <div class="mt-4 pt-4 border-t border-primary-700 text-center">
                   <p class="text-primary-200 text-xs mb-2">
-                    ${mined.length} mined output${mined.length === 1 ? '' : 's'} (${sats.toLocaleString()} sats) can be spent to yourself now.
-                    Once spent, they are ordinary coins and no maturity rule, present or future, can lock them.
+                    ${mined.length} at-risk output${mined.length === 1 ? '' : 's'} (${sats.toLocaleString()} sats). One transaction to yourself makes them safe.
                   </p>
                   <button
                     onClick=${() => onConsolidate(mined)}
                     disabled=${consolidating}
                     class="px-4 py-2 bg-primary-600 hover:bg-primary-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg"
                   >
-                    ${consolidating ? 'Signing & sending…' : `Consolidate ${mined.length} mined output${mined.length === 1 ? '' : 's'} to myself`}
+                    ${consolidating ? 'Signing & sending…' : `Make ${mined.length} output${mined.length === 1 ? '' : 's'} safe: spend to myself`}
                   </button>
                 </div>
               `;
@@ -1288,7 +1297,7 @@
                             if (!isCoinbase || balance.tipHeight == null) return html`<span class="text-primary-400">Confirmed</span>`;
                             const state = maturityState(tx, balance.tipHeight, true);
                             const { policyAt } = coinbaseMaturity(tx.status.block_height, true);
-                            if (state === 'spendable') return html`<span class="text-primary-400">Mined · mature</span>`;
+                            if (state === 'spendable') return html`<span class="text-orange-300">Mined · spendable, at risk until moved</span>`;
                             return html`<span class="${state === 'maturing' ? 'text-yellow-400' : 'text-red-400'}">Mined · ${state}, spendable at block ${policyAt.toLocaleString()}</span>`;
                           })()}
                         </p>
