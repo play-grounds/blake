@@ -78,7 +78,8 @@
     import QRCode from 'https://esm.sh/qrcode@1.5.3';
     import {
       generatePrivateKey, getPublicKey, getXOnlyPubKey, getTaprootAddress,
-      privateKeyToWIF, parsePrivateKey, bytesToHex, hexToBytes, createTransaction
+      privateKeyToWIF, parsePrivateKey, bytesToHex, hexToBytes, createTransaction,
+      coinbaseMaturity, maturityState, LONG_COINBASE_MATURITY
     } from './bitcoin.js';
 
     const html = htm.bind(h);
@@ -142,6 +143,70 @@
         console.error('Error fetching UTXOs:', error);
         return [];
       }
+    }
+
+    async function fetchTipHeight() {
+      try {
+        const response = await fetch(`${API_BASE}/blocks/tip/height`);
+        if (!response.ok) throw new Error('Failed to fetch tip');
+        return parseInt(await response.text(), 10);
+      } catch (error) {
+        console.error('Error fetching tip height:', error);
+        return null;
+      }
+    }
+
+    // Which of these txids are coinbases. The explorer's address/txs pages carry
+    // vin[0].is_coinbase, so page through them (?after_txid=, mempool-style)
+    // until every txid is resolved;
+    // answers never change, so they are cached per txid in localStorage.
+    const COINBASE_CACHE_KEY = 'blake_coinbase';
+    async function fetchCoinbaseFlags(address, txids, firstPage) {
+      let cache = {};
+      try { cache = JSON.parse(localStorage.getItem(COINBASE_CACHE_KEY) || '{}'); } catch {}
+      const todo = new Set(txids.filter((t) => !(t in cache)));
+      const absorb = (txs) => { for (const tx of txs) { cache[tx.txid] = !!tx.vin?.[0]?.is_coinbase; todo.delete(tx.txid); } };
+      absorb(firstPage || []);
+      let last = firstPage?.length ? firstPage[firstPage.length - 1].txid : null;
+      for (let page = 0; todo.size && last && page < 10; page++) {   // mempool pages are 10 txs
+        try {
+          const r = await fetch(`${API_BASE}/address/${address}/txs?after_txid=${last}`);
+          if (!r.ok) break;
+          const txs = await r.json();
+          if (!txs.length) break;
+          absorb(txs);
+          last = txs[txs.length - 1].txid;
+        } catch { break; }
+      }
+      for (const txid of [...todo].slice(0, 20)) {          // leftovers, one by one
+        try {
+          const r = await fetch(`${API_BASE}/tx/${txid}`);
+          if (r.ok) { const tx = await r.json(); cache[txid] = !!tx.vin?.[0]?.is_coinbase; }
+        } catch {}
+      }
+      try { localStorage.setItem(COINBASE_CACHE_KEY, JSON.stringify(cache)); } catch {}
+      return cache;
+    }
+
+    // Sort the wallet's UTXOs into spendable / maturing / locked / pending and
+    // sum each bucket. See coinbaseMaturity in bitcoin.js for the rule.
+    function bucketUtxos(utxos, tipHeight, coinbaseFlags) {
+      const sums = { spendable: 0, maturing: 0, locked: 0, pending: 0 };
+      const annotated = utxos.map((u) => {
+        const isCoinbase = !!coinbaseFlags[u.txid];
+        const state = tipHeight == null ? (u.status?.confirmed ? 'spendable' : 'pending') : maturityState(u, tipHeight, isCoinbase);
+        const { consensusAt, policyAt } = coinbaseMaturity(u.status?.block_height, isCoinbase);
+        sums[state] += u.value;
+        return { ...u, isCoinbase, state, consensusAt, policyAt };
+      });
+      // The next policy unlock: lowest policyAt among maturing/locked outputs.
+      const pending = annotated.filter((u) => u.state === 'maturing' || u.state === 'locked');
+      let nextUnlock = null;
+      if (pending.length) {
+        const at = Math.min(...pending.map((u) => u.policyAt));
+        nextUnlock = { height: at, sats: pending.filter((u) => u.policyAt === at).reduce((a, u) => a + u.value, 0) };
+      }
+      return { utxos: annotated, sums, nextUnlock };
     }
 
     async function fetchFeeRates() {
@@ -257,7 +322,8 @@
     function App() {
       const [wallet, setWallet] = useState(null);
       const [view, setView] = useState('home');
-      const [balance, setBalance] = useState({ confirmed: 0, unconfirmed: 0, total: 0 });
+      const EMPTY_BALANCE = { confirmed: 0, unconfirmed: 0, total: 0, spendable: 0, maturing: 0, locked: 0, pending: 0, tipHeight: null, nextUnlock: null, utxos: [] };
+      const [balance, setBalance] = useState(EMPTY_BALANCE);
       const [transactions, setTransactions] = useState([]);
       const [loading, setLoading] = useState(false);
       const [notification, setNotification] = useState(null);
@@ -307,11 +373,15 @@
         if (!wallet) return;
         setLoading(true);
         try {
-          const [bal, txs] = await Promise.all([
+          const [bal, txs, utxos, tipHeight] = await Promise.all([
             fetchBalance(wallet.address),
-            fetchTransactions(wallet.address)
+            fetchTransactions(wallet.address),
+            fetchUTXOs(wallet.address),
+            fetchTipHeight()
           ]);
-          setBalance(bal);
+          const flags = await fetchCoinbaseFlags(wallet.address, [...new Set(utxos.map((u) => u.txid))], txs);
+          const { utxos: annotated, sums, nextUnlock } = bucketUtxos(utxos, tipHeight, flags);
+          setBalance({ ...bal, ...sums, tipHeight, nextUnlock, utxos: annotated, coinbaseFlags: flags });
           setTransactions(txs);
         } catch (error) {
           showNotification('Error refreshing data', 'error');
@@ -370,7 +440,7 @@
       const logout = () => {
         clearWallet();
         setWallet(null);
-        setBalance({ confirmed: 0, unconfirmed: 0, total: 0 });
+        setBalance(EMPTY_BALANCE);
         setTransactions([]);
         setView('home');
         showNotification('Wallet disconnected', 'info');
@@ -444,6 +514,7 @@
               ${view === 'history' && html`
                 <${HistoryView}
                   wallet=${wallet}
+                  balance=${balance}
                   transactions=${transactions}
                   formatSats=${formatSats}
                   formatDate=${formatDate}
@@ -700,16 +771,36 @@
               <h2 class="text-4xl font-bold text-white mb-2">${formatSats(balance.total)} BTC</h2>
               <p class="text-primary-300 text-sm">${balance.total.toLocaleString()} sats</p>
             </div>
-            <div class="grid grid-cols-2 gap-4 mt-6 pt-6 border-t border-primary-700">
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6 pt-6 border-t border-primary-700">
               <div class="text-center">
-                <p class="text-primary-300 text-xs">Confirmed</p>
-                <p class="text-white font-medium">${formatSats(balance.confirmed)} BTC</p>
+                <p class="text-primary-300 text-xs">Spendable</p>
+                <p class="text-white font-medium">${formatSats(balance.spendable)} BTC</p>
+              </div>
+              <div class="text-center">
+                <p class="text-primary-300 text-xs">Maturing</p>
+                <p class="text-yellow-300 font-medium">${formatSats(balance.maturing)} BTC</p>
+              </div>
+              <div class="text-center">
+                <p class="text-primary-300 text-xs">Locked</p>
+                <p class="text-red-300 font-medium">${formatSats(balance.locked)} BTC</p>
               </div>
               <div class="text-center">
                 <p class="text-primary-300 text-xs">Pending</p>
-                <p class="text-white font-medium">${formatSats(balance.unconfirmed)} BTC</p>
+                <p class="text-white font-medium">${formatSats(balance.pending)} BTC</p>
               </div>
             </div>
+            ${(balance.maturing > 0 || balance.locked > 0) && html`
+              <p class="text-primary-200 text-xs mt-4 text-center leading-relaxed">
+                Mined coins need ${LONG_COINBASE_MATURITY.depth.toLocaleString()} confirmations before Knots 29.4.2 nodes will relay a spend
+                (<a href="https://github.com/bitcoinknots/bitcoin/pull/419" target="_blank" class="underline">PR 419</a>).
+                <span class="text-yellow-300">Maturing</span> coins are already valid by consensus but not yet by that policy;
+                <span class="text-red-300">locked</span> coins are not yet valid at all.
+                ${balance.nextUnlock && balance.tipHeight != null ? html`
+                  Next unlock: ${balance.nextUnlock.sats.toLocaleString()} sats at block ${balance.nextUnlock.height.toLocaleString()},
+                  ${Math.max(0, balance.nextUnlock.height - balance.tipHeight - 1).toLocaleString()} blocks from now.
+                ` : ''}
+              </p>
+            `}
           </div>
 
           <!-- Address Card -->
@@ -875,16 +966,20 @@
         }
 
         const satsAmount = Math.floor(parseFloat(amount) * 100000000);
-        if (satsAmount <= 0 || satsAmount > balance.total) {
-          showNotification('Invalid amount', 'error');
+        if (satsAmount <= 0 || satsAmount > balance.spendable) {
+          showNotification(satsAmount > balance.spendable && satsAmount <= balance.total
+            ? 'Amount exceeds the spendable balance: the rest is mined coin still maturing'
+            : 'Invalid amount', 'error');
           return;
         }
 
         setSending(true);
         try {
-          const utxos = await fetchUTXOs(wallet.address);
+          // Spend only outputs a Knots 29.4.2 node will relay; a transaction
+          // that touches a maturing coinbase is valid but goes nowhere.
+          const utxos = balance.utxos.filter((u) => u.state === 'spendable');
           if (utxos.length === 0) {
-            throw new Error('No UTXOs available');
+            throw new Error(balance.total > 0 ? 'Nothing spendable yet: mined coins are still maturing' : 'No UTXOs available');
           }
 
           const privateKey = hexToBytes(wallet.privateKey);
@@ -905,7 +1000,7 @@
 
       const setMaxAmount = () => {
         // Leave some for fee
-        const maxSats = balance.total - (feeRate * 200);
+        const maxSats = balance.spendable - (feeRate * 200);
         if (maxSats > 0) {
           setAmount((maxSats / 100000000).toFixed(8));
         }
@@ -971,7 +1066,7 @@
                     </button>
                   </div>
                   <p class="text-gray-500 text-xs mt-1">
-                    Available: ${formatSats(balance.total)} BTC
+                    Spendable: ${formatSats(balance.spendable)} BTC${balance.maturing + balance.locked > 0 ? html` <span class="text-yellow-500">(+${formatSats(balance.maturing + balance.locked)} maturing)</span>` : ''}
                   </p>
                 </div>
 
@@ -1098,7 +1193,7 @@
       `;
     }
 
-    function HistoryView({ wallet, transactions, formatSats, formatDate, truncateHash }) {
+    function HistoryView({ wallet, transactions, balance, formatSats, formatDate, truncateHash }) {
       return html`
         <div class="bg-gray-800 rounded-xl p-6">
           <h3 class="text-xl font-semibold text-white mb-6">Transaction History</h3>
@@ -1145,11 +1240,16 @@
                           ${type === 'received' ? '+' : '-'}${formatSats(amount)} BTC
                         </p>
                         <p class="text-gray-500 text-sm">
-                          ${tx.status.confirmed ? html`
-                            <span class="text-primary-400">Confirmed</span>
-                          ` : html`
+                          ${!tx.status.confirmed ? html`
                             <span class="text-yellow-400">Pending</span>
-                          `}
+                          ` : (() => {
+                            const isCoinbase = !!tx.vin?.[0]?.is_coinbase;
+                            if (!isCoinbase || balance.tipHeight == null) return html`<span class="text-primary-400">Confirmed</span>`;
+                            const state = maturityState(tx, balance.tipHeight, true);
+                            const { policyAt } = coinbaseMaturity(tx.status.block_height, true);
+                            if (state === 'spendable') return html`<span class="text-primary-400">Mined · mature</span>`;
+                            return html`<span class="${state === 'maturing' ? 'text-yellow-400' : 'text-red-400'}">Mined · ${state}, spendable at block ${policyAt.toLocaleString()}</span>`;
+                          })()}
                         </p>
                       </div>
                     </div>

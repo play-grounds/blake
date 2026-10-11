@@ -455,3 +455,32 @@ export async function createTransaction(privateKey, utxos, toAddress, amount, fe
     amount: Number(targetAmount)
   };
 }
+
+// ---- Coinbase maturity on the BLAKE2b chain ---------------------------------
+// Knots PR 419 ("long coinbase maturity", part 1 of 3): coinbases mined at or
+// after `start` need `depth` confirmations instead of 100, enforced by consensus
+// only in blocks `start`..`release-1`. Policy (mempool/relay/mining on Knots
+// 29.4.2) applies `depth` to every coinbase regardless of height or window, so
+// a spend can be valid by consensus and still unrelayable.
+export const COINBASE_MATURITY = 100;
+export const LONG_COINBASE_MATURITY = { start: 973440, release: 979920, depth: 6480 };
+
+// Earliest spend heights for one output. `height` is the block that created it
+// (null/undefined if unconfirmed).
+export function coinbaseMaturity(height, isCoinbase, params = LONG_COINBASE_MATURITY) {
+  if (!isCoinbase || height == null) return { consensusAt: 0, policyAt: 0 };
+  const std = height + COINBASE_MATURITY;
+  if (height < params.start) return { consensusAt: std, policyAt: height + params.depth };
+  // In the window the long depth rules; once the window closes only 100 is asked.
+  const consensusAt = Math.min(height + params.depth, Math.max(params.release, std));
+  return { consensusAt, policyAt: height + params.depth };
+}
+
+// 'spendable' | 'maturing' (consensus-mature, policy-locked) | 'locked' | 'pending'
+export function maturityState(utxo, tipHeight, isCoinbase, params) {
+  if (!utxo.status?.confirmed) return 'pending';
+  const spendHeight = tipHeight + 1;
+  const { consensusAt, policyAt } = coinbaseMaturity(utxo.status.block_height, isCoinbase, params);
+  if (spendHeight >= policyAt) return 'spendable';
+  return spendHeight >= consensusAt ? 'maturing' : 'locked';
+}

@@ -60,5 +60,30 @@ const legacy = await createTransaction(priv, utxos, dest, 60_000, 2, { unified: 
 const lp = parseTransaction(hexToBytes(legacy.hex));
 ok(lp.inputs.every(i => i.witness[0].length === 64), 'legacy path signs 64-byte SIGHASH_DEFAULT');
 
+
+// ---- coinbase maturity (Knots PR 419) --------------------------------------
+{
+  const { coinbaseMaturity, maturityState } = await import('./bitcoin.js');
+  const tip = 976661;
+  ok(coinbaseMaturity(970198, false).policyAt === 0, 'non-coinbase has no maturity');
+  let m = coinbaseMaturity(970198, true);
+  ok(m.consensusAt === 970298 && m.policyAt === 976678, 'pre-window coinbase: 100 by consensus, 6480 by policy');
+  m = coinbaseMaturity(973439, true);
+  ok(m.consensusAt === 973539 && m.policyAt === 979919, 'last pre-window height still 100 by consensus');
+  m = coinbaseMaturity(974010, true);
+  ok(m.consensusAt === 979920 && m.policyAt === 980490, 'in-window coinbase: released when the window closes, 6480 by policy');
+  m = coinbaseMaturity(973440, true);
+  ok(m.consensusAt === 979920 && m.policyAt === 979920, 'first in-window height: both at release');
+  m = coinbaseMaturity(979900, true);
+  ok(m.consensusAt === 980000 && m.policyAt === 986380, 'near release: 100 by consensus once window closes');
+  const u = (h, confirmed = true) => ({ status: { confirmed, block_height: h } });
+  ok(maturityState(u(970198), tip, true) === 'maturing', 'maturing at tip 976661');
+  ok(maturityState(u(970198), 976677, true) === 'spendable', 'spendable once 6480 deep');
+  ok(maturityState(u(974010), tip, true) === 'locked', 'in-window coinbase locked');
+  ok(maturityState(u(974010), 979919, true) === 'maturing', 'consensus-mature at release, policy-locked');
+  ok(maturityState(u(970441), tip, false) === 'spendable', 'ordinary receipt spendable');
+  ok(maturityState(u(null, false), tip, false) === 'pending', 'unconfirmed is pending');
+}
+
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
