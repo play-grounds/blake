@@ -814,12 +814,8 @@
               <p class="text-primary-200 text-xs mt-4 text-center leading-relaxed">
                 Mined coins need ${LONG_COINBASE_MATURITY.depth.toLocaleString()} confirmations before Knots 29.4.2 nodes will relay a spend
                 (<a href="https://github.com/bitcoinknots/bitcoin/pull/419" target="_blank" class="underline">PR 419</a>).
-                <span class="text-yellow-300">Maturing</span> coins are already valid by consensus but not yet by that policy;
-                <span class="text-red-300">locked</span> coins are not yet valid at all.
-                ${balance.nextUnlock && balance.tipHeight != null ? html`
-                  Next unlock: ${balance.nextUnlock.sats.toLocaleString()} sats at block ${balance.nextUnlock.height.toLocaleString()},
-                  ${Math.max(0, balance.nextUnlock.height - balance.tipHeight - 1).toLocaleString()} blocks from now.
-                ` : ''}
+                <span class="text-yellow-300">Maturing</span> coins are already valid by consensus but not yet by that policy; <span class="text-red-300">locked</span> coins are not yet valid at all.
+                ${balance.nextUnlock && balance.tipHeight != null ? html` Next unlock: ${balance.nextUnlock.sats.toLocaleString()} sats at block ${balance.nextUnlock.height.toLocaleString()}, ${Math.max(0, balance.nextUnlock.height - balance.tipHeight - 1).toLocaleString()} blocks from now.` : ''}
               </p>
             `}
             ${(() => {
