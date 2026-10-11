@@ -1040,8 +1040,12 @@
       };
 
       const setMaxAmount = () => {
-        // Leave some for fee
-        const maxSats = balance.spendable - (feeRate * 200);
+        // Leave exactly the fee the builder will charge for spending every
+        // spendable output: 10.5 overhead + 57.75 per input + two P2TR outputs
+        // (it always prices the change output, even when it then drops it).
+        const n = (balance.utxos || []).filter((u) => u.state === 'spendable').length;
+        const vbytes = Math.ceil(10.5 + n * 57.75 + 2 * 43);
+        const maxSats = balance.spendable - vbytes * feeRate;
         if (maxSats > 0) {
           setAmount((maxSats / 100000000).toFixed(8));
         }
