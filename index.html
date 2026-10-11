@@ -213,6 +213,22 @@
       return { utxos: annotated, sums, nextUnlock };
     }
 
+    // Seconds per block over roughly the last 150 blocks, for unlock ETAs.
+    async function fetchBlockRate(tipHeight) {
+      try {
+        const [a, b] = await Promise.all([
+          fetch(`${API_BASE}/v1/blocks/${tipHeight}`).then((r) => r.json()),
+          fetch(`${API_BASE}/v1/blocks/${tipHeight - 150}`).then((r) => r.json()),
+        ]);
+        const newest = a[0], oldest = b[b.length - 1];
+        const secs = (newest.timestamp - oldest.timestamp) / (newest.height - oldest.height);
+        return { secondsPerBlock: secs, tipTime: newest.timestamp };
+      } catch (error) {
+        console.error('Error fetching block rate:', error);
+        return { secondsPerBlock: 600, tipTime: Math.floor(Date.now() / 1000) };
+      }
+    }
+
     async function fetchFeeRates() {
       try {
         const response = await fetch(`${API_BASE}/v1/fees/recommended`);
@@ -383,9 +399,12 @@
             fetchUTXOs(wallet.address),
             fetchTipHeight()
           ]);
-          const flags = await fetchCoinbaseFlags(wallet.address, [...new Set(utxos.map((u) => u.txid))], txs);
+          const [flags, rate] = await Promise.all([
+            fetchCoinbaseFlags(wallet.address, [...new Set(utxos.map((u) => u.txid))], txs),
+            tipHeight == null ? null : fetchBlockRate(tipHeight),
+          ]);
           const { utxos: annotated, sums, nextUnlock } = bucketUtxos(utxos, tipHeight, flags);
-          setBalance({ ...bal, ...sums, tipHeight, nextUnlock, utxos: annotated, coinbaseFlags: flags });
+          setBalance({ ...bal, ...sums, tipHeight, nextUnlock, utxos: annotated, coinbaseFlags: flags, rate });
           setTransactions(txs);
         } catch (error) {
           showNotification('Error refreshing data', 'error');
@@ -515,6 +534,10 @@
                 <${ReceiveView} wallet=${wallet} onShowInfo=${() => setShowSchemeInfo(true)} />
               `}
 
+              ${view === 'maturity' && html`
+                <${MaturityView} balance=${balance} formatSats=${formatSats} truncateHash=${truncateHash} />
+              `}
+
               ${view === 'history' && html`
                 <${HistoryView}
                   wallet=${wallet}
@@ -627,6 +650,7 @@
         { id: 'send', label: 'Send', icon: 'M12 19l9 2-9-18-9 18 9-2zm0 0v-8' },
         { id: 'receive', label: 'Receive', icon: 'M12 4v16m8-8H4' },
         { id: 'history', label: 'History', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
+        { id: 'maturity', label: 'Maturity', icon: 'M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z' },
         { id: 'settings', label: 'Settings', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z' }
       ];
 
@@ -1238,6 +1262,80 @@
             >
               How is this address derived?
             </button>
+          </div>
+        </div>
+      `;
+    }
+
+    // When each mined output comes due: by consensus, by Knots policy, and an
+    // ETA from the recent block rate. Grouped by the day the policy unlock lands.
+    function MaturityView({ balance, formatSats, truncateHash }) {
+      const tip = balance.tipHeight, rate = balance.rate;
+      const mined = (balance.utxos || []).filter((u) => u.isCoinbase && u.status?.confirmed).sort((a, b) => a.policyAt - b.policyAt);
+      const eta = (height) => (tip == null || !rate) ? null : new Date((rate.tipTime + (height - tip) * rate.secondsPerBlock) * 1000);
+      const dayKey = (d) => d ? d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) : '—';
+      const when = (d) => d ? d.toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+      const minutes = rate ? Math.round(rate.secondsPerBlock / 60) : null;
+      const stateLabel = { spendable: ['At risk · spendable now', 'text-orange-300'], maturing: ['Maturing', 'text-yellow-300'], locked: ['Locked', 'text-red-300'], pending: ['Pending', 'text-gray-400'] };
+      // groups by policy-unlock day
+      const groups = [];
+      for (const u of mined) {
+        const d = eta(u.policyAt); const key = u.state === 'spendable' ? 'Now' : dayKey(d);
+        let g = groups[groups.length - 1];
+        if (!g || g.key !== key) { g = { key, n: 0, sats: 0, first: u.policyAt, last: u.policyAt, lastEta: d, minedFirst: u.status.block_height, minedLast: u.status.block_height }; groups.push(g); }
+        g.n++; g.sats += u.value; g.last = u.policyAt; g.lastEta = d; g.minedLast = u.status.block_height;
+      }
+      let cum = 0;
+      return html`
+        <div class="space-y-6">
+          <div class="bg-gray-800 rounded-2xl p-6 shadow-xl">
+            <h2 class="text-xl font-bold text-white mb-1">When mined coins come due</h2>
+            <p class="text-gray-400 text-sm mb-4">
+              ${mined.length} mined output${mined.length === 1 ? '' : 's'}, ${formatSats(mined.reduce((a, u) => a + u.value, 0))} BTC.
+              Policy: ${LONG_COINBASE_MATURITY.depth.toLocaleString()} confirmations (<a href="https://github.com/bitcoinknots/bitcoin/pull/419" target="_blank" class="text-primary-400 underline">PR 419</a>).
+              Consensus: 100, or ${LONG_COINBASE_MATURITY.depth.toLocaleString()} for coins mined from block ${LONG_COINBASE_MATURITY.start.toLocaleString()} until block ${LONG_COINBASE_MATURITY.release.toLocaleString()}.
+              ${tip != null ? html`Tip ${tip.toLocaleString()}${minutes ? `, about ${minutes} min per block lately` : ''}; ETAs assume that rate.` : ''}
+            </p>
+            ${mined.length === 0 ? html`<p class="text-gray-500">No mined outputs in this wallet.</p>` : html`
+              <h3 class="text-white font-semibold mt-4 mb-2">By day</h3>
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead><tr class="text-gray-500 text-left">
+                    <th class="py-2 pr-3">Spend to self on</th><th class="py-2 pr-3">Mined in blocks</th><th class="py-2 pr-3">Unlock blocks</th><th class="py-2 pr-3 text-right">Outputs</th><th class="py-2 pr-3 text-right">Sats</th><th class="py-2 text-right">Running total</th>
+                  </tr></thead>
+                  <tbody>
+                    ${groups.map((g) => { cum += g.sats; return html`
+                      <tr class="border-t border-gray-700 ${g.key === 'Now' ? 'text-orange-300' : 'text-gray-200'}">
+                        <td class="py-2 pr-3 whitespace-nowrap">${g.key === 'Now' ? 'Now' : `${g.key}, by ${when(g.lastEta).split(', ').pop()}`}</td>
+                        <td class="py-2 pr-3 whitespace-nowrap text-gray-400">${g.minedFirst.toLocaleString()}${g.minedLast !== g.minedFirst ? ' – ' + g.minedLast.toLocaleString() : ''}</td>
+                        <td class="py-2 pr-3 whitespace-nowrap text-gray-400">${g.first.toLocaleString()}${g.last !== g.first ? ' – ' + g.last.toLocaleString() : ''}</td>
+                        <td class="py-2 pr-3 text-right">${g.n}</td>
+                        <td class="py-2 pr-3 text-right">${g.sats.toLocaleString()}</td>
+                        <td class="py-2 text-right">${cum.toLocaleString()}</td>
+                      </tr>`; })}
+                  </tbody>
+                </table>
+              </div>
+              <h3 class="text-white font-semibold mt-6 mb-2">Every output</h3>
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead><tr class="text-gray-500 text-left">
+                    <th class="py-2 pr-3">Mined</th><th class="py-2 pr-3 text-right">Sats</th><th class="py-2 pr-3">Valid by consensus</th><th class="py-2 pr-3">Relayed by policy</th><th class="py-2 pr-3">ETA</th><th class="py-2">State</th>
+                  </tr></thead>
+                  <tbody>
+                    ${mined.map((u) => { const [label, cls] = stateLabel[u.state] || ['', '']; const h = u.status.block_height; return html`
+                      <tr class="border-t border-gray-800 text-gray-300">
+                        <td class="py-1.5 pr-3 whitespace-nowrap"><a href="${txLink(u.txid)}" target="_blank" class="text-primary-400 hover:text-primary-300">${truncateHash(u.txid, 6)}</a> <span class="text-gray-500">block ${h.toLocaleString()}</span></td>
+                        <td class="py-1.5 pr-3 text-right">${u.value.toLocaleString()}</td>
+                        <td class="py-1.5 pr-3 whitespace-nowrap ${tip != null && tip + 1 >= u.consensusAt ? 'text-primary-400' : ''}">${u.consensusAt.toLocaleString()}</td>
+                        <td class="py-1.5 pr-3 whitespace-nowrap ${tip != null && tip + 1 >= u.policyAt ? 'text-primary-400' : ''}">${u.policyAt.toLocaleString()}</td>
+                        <td class="py-1.5 pr-3 whitespace-nowrap text-gray-400">${u.state === 'spendable' ? 'now' : when(eta(u.policyAt))}</td>
+                        <td class="py-1.5 whitespace-nowrap ${cls}">${label}</td>
+                      </tr>`; })}
+                  </tbody>
+                </table>
+              </div>
+            `}
           </div>
         </div>
       `;
