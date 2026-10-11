@@ -1282,8 +1282,8 @@
       for (const u of mined) {
         const d = eta(u.policyAt); const key = u.state === 'spendable' ? 'Now' : dayKey(d);
         let g = groups[groups.length - 1];
-        if (!g || g.key !== key) { g = { key, n: 0, sats: 0, first: u.policyAt, last: u.policyAt, lastEta: d, minedFirst: u.status.block_height, minedLast: u.status.block_height }; groups.push(g); }
-        g.n++; g.sats += u.value; g.last = u.policyAt; g.lastEta = d; g.minedLast = u.status.block_height;
+        if (!g || g.key !== key) { g = { key, n: 0, sats: 0, first: u.policyAt, last: u.policyAt, lastEta: d, minedFirst: u.status.block_height, minedLast: u.status.block_height, tFirst: u.status.block_time, tLast: u.status.block_time }; groups.push(g); }
+        g.n++; g.sats += u.value; g.last = u.policyAt; g.lastEta = d; g.minedLast = u.status.block_height; g.tLast = u.status.block_time;
       }
       let cum = 0;
       return html`
@@ -1301,12 +1301,13 @@
               <div class="overflow-x-auto">
                 <table class="w-full text-sm">
                   <thead><tr class="text-gray-500 text-left">
-                    <th class="py-2 pr-3">Spend to self on</th><th class="py-2 pr-3">Mined in blocks</th><th class="py-2 pr-3">Unlock blocks</th><th class="py-2 pr-3 text-right">Outputs</th><th class="py-2 pr-3 text-right">Sats</th><th class="py-2 text-right">Running total</th>
+                    <th class="py-2 pr-3">Spend to self on</th><th class="py-2 pr-3">Mined</th><th class="py-2 pr-3">Mined in blocks</th><th class="py-2 pr-3">Unlock blocks</th><th class="py-2 pr-3 text-right">Outputs</th><th class="py-2 pr-3 text-right">Sats</th><th class="py-2 text-right">Running total</th>
                   </tr></thead>
                   <tbody>
                     ${groups.map((g) => { cum += g.sats; return html`
                       <tr class="border-t border-gray-700 ${g.key === 'Now' ? 'text-orange-300' : 'text-gray-200'}">
                         <td class="py-2 pr-3 whitespace-nowrap">${g.key === 'Now' ? 'Now' : `${g.key}, by ${when(g.lastEta).split(', ').pop()}`}</td>
+                        <td class="py-2 pr-3 whitespace-nowrap text-gray-400">${g.tFirst ? dayKey(new Date(g.tFirst * 1000)) : '—'}${g.tLast && dayKey(new Date(g.tLast * 1000)) !== dayKey(new Date(g.tFirst * 1000)) ? ' – ' + dayKey(new Date(g.tLast * 1000)) : ''}</td>
                         <td class="py-2 pr-3 whitespace-nowrap text-gray-400">${g.minedFirst.toLocaleString()}${g.minedLast !== g.minedFirst ? ' – ' + g.minedLast.toLocaleString() : ''}</td>
                         <td class="py-2 pr-3 whitespace-nowrap text-gray-400">${g.first.toLocaleString()}${g.last !== g.first ? ' – ' + g.last.toLocaleString() : ''}</td>
                         <td class="py-2 pr-3 text-right">${g.n}</td>
@@ -1320,12 +1321,13 @@
               <div class="overflow-x-auto">
                 <table class="w-full text-sm">
                   <thead><tr class="text-gray-500 text-left">
-                    <th class="py-2 pr-3">Mined</th><th class="py-2 pr-3 text-right">Sats</th><th class="py-2 pr-3">Valid by consensus</th><th class="py-2 pr-3">Relayed by policy</th><th class="py-2 pr-3">ETA</th><th class="py-2">State</th>
+                    <th class="py-2 pr-3">Mined</th><th class="py-2 pr-3">Date</th><th class="py-2 pr-3 text-right">Sats</th><th class="py-2 pr-3">Valid by consensus</th><th class="py-2 pr-3">Relayed by policy</th><th class="py-2 pr-3">ETA</th><th class="py-2">State</th>
                   </tr></thead>
                   <tbody>
                     ${mined.map((u) => { const [label, cls] = stateLabel[u.state] || ['', '']; const h = u.status.block_height; return html`
                       <tr class="border-t border-gray-800 text-gray-300">
                         <td class="py-1.5 pr-3 whitespace-nowrap"><a href="${txLink(u.txid)}" target="_blank" class="text-primary-400 hover:text-primary-300">${truncateHash(u.txid, 6)}</a> <span class="text-gray-500">block ${h.toLocaleString()}</span></td>
+                        <td class="py-1.5 pr-3 whitespace-nowrap text-gray-400">${u.status.block_time ? when(new Date(u.status.block_time * 1000)) : '—'}</td>
                         <td class="py-1.5 pr-3 text-right">${u.value.toLocaleString()}</td>
                         <td class="py-1.5 pr-3 whitespace-nowrap ${tip != null && tip + 1 >= u.consensusAt ? 'text-primary-400' : ''}">${u.consensusAt.toLocaleString()}</td>
                         <td class="py-1.5 pr-3 whitespace-nowrap ${tip != null && tip + 1 >= u.policyAt ? 'text-primary-400' : ''}">${u.policyAt.toLocaleString()}</td>
